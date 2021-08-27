@@ -91,6 +91,7 @@ function serveIndex(root, options) {
   // resolve root to absolute and normalize
   var rootPath = normalize(resolve(root) + sep);
 
+  var fileSystem = opts.fileSystem || fs;
   var filter = opts.filter;
   var hidden = opts.hidden;
   var icons = opts.icons;
@@ -134,7 +135,7 @@ function serveIndex(root, options) {
 
     // check if we have a directory
     debug('stat "%s"', path);
-    fs.stat(path, function(err, stat){
+    fileSystem.stat(path, function(err, stat){
       if (err && err.code === 'ENOENT') {
         return next();
       }
@@ -150,7 +151,7 @@ function serveIndex(root, options) {
 
       // fetch files
       debug('readdir "%s"', path);
-      fs.readdir(path, function(err, files){
+      fileSystem.readdir(path, function(err, files){
         if (err) return next(err);
         if (!hidden) files = removeHidden(files);
         if (filter) files = files.filter(function(filename, index, list) {
@@ -164,7 +165,7 @@ function serveIndex(root, options) {
 
         // not acceptable
         if (!type) return next(createError(406));
-        serveIndex[mediaType[type]](req, res, files, next, originalDir, showUp, icons, path, view, template, stylesheet);
+        serveIndex[mediaType[type]](req, res, files, next, originalDir, showUp, icons, path, fileSystem, view, template, stylesheet);
       });
     });
   };
@@ -174,9 +175,9 @@ function serveIndex(root, options) {
  * Respond with text/html.
  */
 
-serveIndex.html = function _html(req, res, files, next, dir, showUp, icons, path, view, template, stylesheet) {
+serveIndex.html = function _html(req, res, files, next, dir, showUp, icons, path, fileSystem, view, template, stylesheet) {
   var render = typeof template !== 'function'
-    ? createHtmlRender(template)
+    ? createHtmlRender(template, fileSystem)
     : template
 
   if (showUp) {
@@ -184,14 +185,14 @@ serveIndex.html = function _html(req, res, files, next, dir, showUp, icons, path
   }
 
   // stat all files
-  stat(path, files, function (err, fileList) {
+  stat(fileSystem, path, files, function (err, fileList) {
     if (err) return next(err);
 
     // sort file list
     fileList.sort(fileSort);
 
     // read stylesheet
-    fs.readFile(stylesheet, 'utf8', function (err, style) {
+    fileSystem.readFile(stylesheet, 'utf8', function (err, style) {
       if (err) return next(err);
 
       // create locals for rendering
@@ -200,6 +201,7 @@ serveIndex.html = function _html(req, res, files, next, dir, showUp, icons, path
         displayIcons: Boolean(icons),
         fileList: fileList,
         path: path,
+        fileSystem: fileSystem,
         style: style,
         viewName: view
       };
@@ -217,9 +219,9 @@ serveIndex.html = function _html(req, res, files, next, dir, showUp, icons, path
  * Respond with application/json.
  */
 
-serveIndex.json = function _json (req, res, files, next, dir, showUp, icons, path) {
+serveIndex.json = function _json (req, res, files, next, dir, showUp, icons, path, fileSystem) {
   // stat all files
-  stat(path, files, function (err, fileList) {
+  stat(fileSystem, path, files, function (err, fileList) {
     if (err) return next(err)
 
     // sort file list
@@ -238,9 +240,9 @@ serveIndex.json = function _json (req, res, files, next, dir, showUp, icons, pat
  * Respond with text/plain.
  */
 
-serveIndex.plain = function _plain (req, res, files, next, dir, showUp, icons, path) {
+serveIndex.plain = function _plain (req, res, files, next, dir, showUp, icons, path, fileSystem) {
   // stat all files
-  stat(path, files, function (err, fileList) {
+  stat(fileSystem, path, files, function (err, fileList) {
     if (err) return next(err)
 
     // sort file list
@@ -320,14 +322,14 @@ function createHtmlFileList(files, dir, useIcons, view) {
  * Create function to render html.
  */
 
-function createHtmlRender(template) {
+function createHtmlRender(template, fileSystem) {
   return function render(locals, callback) {
     // read template
-    fs.readFile(template, 'utf8', function (err, str) {
+    fileSystem.readFile(template, 'utf8', function (err, str) {
       if (err) return callback(err);
 
       var body = str
-        .replace(/\{style\}/g, locals.style.concat(iconStyle(locals.fileList, locals.displayIcons)))
+        .replace(/\{style\}/g, locals.style.concat(iconStyle(fileSystem, locals.fileList, locals.displayIcons)))
         .replace(/\{files\}/g, createHtmlFileList(locals.fileList, locals.directory, locals.displayIcons, locals.viewName))
         .replace(/\{directory\}/g, escapeHtml(locals.directory))
         .replace(/\{linked-path\}/g, htmlPath(locals.directory));
@@ -450,7 +452,7 @@ function iconLookup(filename) {
  * Load icon images, return css string.
  */
 
-function iconStyle(files, useIcons) {
+function iconStyle(fileSystem, files, useIcons) {
   if (!useIcons) return '';
   var i;
   var list = [];
@@ -471,7 +473,7 @@ function iconStyle(files, useIcons) {
     selector = '#files .' + icon.className + ' .name';
 
     if (!rules[iconName]) {
-      rules[iconName] = 'background-image: url(data:image/png;base64,' + load(iconName) + ');'
+      rules[iconName] = 'background-image: url(data:image/png;base64,' + load(fileSystem, iconName) + ');'
       selectors[iconName] = [];
       list.push(iconName);
     }
@@ -497,9 +499,9 @@ function iconStyle(files, useIcons) {
  * @api private
  */
 
-function load(icon) {
+function load(fileSystem, icon) {
   if (cache[icon]) return cache[icon];
-  return cache[icon] = fs.readFileSync(__dirname + '/public/icons/' + icon, 'base64');
+  return cache[icon] = fileSystem.readFileSync(__dirname + '/public/icons/' + icon, 'base64');
 }
 
 /**
@@ -556,14 +558,14 @@ function send (res, type, body) {
  * @api private
  */
 
-function stat(dir, files, cb) {
+function stat(fileSystem, dir, files, cb) {
   var batch = new Batch();
 
   batch.concurrency(10);
 
   files.forEach(function(file){
     batch.push(function(done){
-      fs.stat(join(dir, file), function(err, stat){
+      fileSystem.stat(join(dir, file), function(err, stat){
         if (err && err.code !== 'ENOENT') return done(err);
 
         // pass ENOENT as null stat, not error
